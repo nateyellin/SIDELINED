@@ -1,0 +1,719 @@
+---
+title: "Data Analysis"
+author: "Nate Yellin" 
+---
+# Libraries
+```{r}
+library(data.table)
+library(tidyverse)
+library(rvest)
+library(stringi)
+library(tidytext)
+library(wordcloud)
+library(reshape2)
+library(tokenizers)
+library(wordcloud)
+library(gridExtra)
+library(ggwordcloud)
+library(gt)
+library(kableExtra)
+```
+
+
+```{r}
+clean_article <- function (article_text){
+  article_text <- tolower(article_text) 
+  article_text <- gsub("[^[:alnum:] ]", " ", article_text)
+  article_text <- trimws(article_text)
+  article_text <- str_squish(article_text)
+  return(article_text)}
+
+###
+find_keywords <- function(article_text, keyword_list){
+  article_words <- str_extract_all(article_text, pattern = "\\w+") %>% unlist()
+  keyword_count <- lapply(keyword_list, 
+                          function(x){
+                            data.table(
+                              keyword = x,
+                              count = sum(grepl(x, article_words))
+                            )
+                          }) %>%
+    rbindlist(use.names = T, fill = T)
+  return(keyword_count)
+}
+
+name_into_lastname <- function(y, gender){
+  names.split <- strsplit(unlist(y$Name), " ")
+  name.first <- sapply(names.split, function(x) x[1])
+  if (gender == "men") {
+    name.last <- sapply(names.split, function(x)
+      if(length(x) == 0) {
+        NA
+      } else if (x[length(x)] %in% c("Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV", "P", "V", "VI", "n", "s", "S", "P")) {
+        
+        gsub("[[:punct:]]", "", x[length(x) - 1])
+        
+      } else {
+        
+        x[length(x)]
+        
+      })
+    y$last_name_m <- tolower(name.last)
+  } else if (gender == "women") {
+    name.last <- sapply(names.split, function(x)
+      if(length(x) == 0) {
+        NA
+      } else if (x[length(x)] %in% c("Jr.", "Jr", "Sr.", "Sr", "II", "III", "IV", "P", "V", "VI", "N", "S", "AT")) {
+        
+        gsub("[[:punct:]]", "", x[length(x) - 1])
+        
+      } else {
+        
+        x[length(x)]
+        
+      })
+    y$last_name_w <- tolower(name.last)
+  }
+}
+
+player_search <- function(team_name,
+                          league){
+  if (league == 'NCAAM'){
+   team_df = mens_teams
+   player_names = m_names
+   article_folder = 'Shiny_Mens_Text'} else if (league == 'NCAAW'){
+   team_df = womens_teams 
+   player_names = w_names
+   article_folder = 'Shiny_Womens_Text'}
+
+  ## find the articles
+  team_articles <- team_df %>%
+    filter(grepl(team_name, team)) %>%
+    pull(article_file_name)
+  ## find players
+  team_last_names <-player_names %>%
+    filter(grepl(team_name, team)) %>%
+    pull(last_name)
+  
+  ## search for players in the articles
+  article_results <- lapply(team_articles, 
+                            function(z){
+                              tryCatch({
+                                art <- read_file(file.path(article_folder, z)) %>%
+                                  clean_article
+                                df <- find_keywords(art, team_last_names)
+                                df$article_file_name <- z
+                                df$team <- team_name
+                                return(df)
+                              }, error = function(e){
+                                return(data.table(keyword = NA, count = NA, article_file_name = z))
+                              }
+                              )
+  
+                            }) %>%
+    rbindlist(., use.names = T, fill = T)
+
+  return(article_results)
+}
+adj_assignment <- function(file_name, player_name){
+  ## read in article
+  example_article <- read_file(file_name) 
+  ## sep into sentences
+  article_sentences <- example_article %>% as.character %>% tokenize_sentences() %>% unlist()
+  ## pulling adjectives out of each sentence
+  article_adjectives <- article_sentences %>%
+    lapply(., function(x){
+      unnest_tokens(tibble(txt=x),word, txt) %>%
+        left_join(parts_of_speech) %>%
+        filter(pos %in% c("Adjective")) %>%
+        pull(word) %>%
+        unique 
+    }) 
+  ## get names of players in article
+  player_name <- player_name %>%
+    filter(article_file_name == basename(file_name)) %>%
+    filter(count > 0)
+  ## iterate through player_names to assign article adjectives
+  player_adj <- lapply(player_name$keyword, function(x){
+    article_adjectives[grepl(x, article_sentences)]
+  })
+  ## bind the adj back to the players in the df
+  player_name$player_adj <- player_adj
+  return(player_name)
+}
+
+```
+
+# Create Surname Keyword Identifiers
+```{r}
+m_names <- m_team_stats %>%
+  select(Name, team) %>%
+  mutate(last_name = "") 
+m_names$last_name <- name_into_lastname(m_team_stats, gender = "men")
+w_names <- w_team_stats %>%
+  select(Name, team) %>%
+  mutate(last_name = "")
+w_names$last_name <- name_into_lastname(w_team_stats, gender = "women")
+
+```
+
+# Loop through Teams to Find Keyword Counts of Players
+```{r}
+all_mens_team_player_counts <- lapply(
+  mens_teams$team,
+  function(x) player_search(team_name = x, league = "NCAAM")
+) %>% rbindlist(., use.names = T, fill = T)
+
+all_womens_team_player_counts <- lapply(
+  womens_teams$team,
+  function(x) player_search(team_name = x, league = "NCAAW")
+) %>% rbindlist(., use.names = T, fill = T) 
+
+## %>%filter(!is.na(keyword))
+
+```
+# Figure out what is all_womens vs w_filtered_ vs vs 
+# need to figure out what is "g" and then make my main_dfs for both genders
+
+# Create base for the main_dfs. After chunk, will focus on the adjective extraction, but will later come back to these dfs
+```{r}
+main_mens_df <- left_join(m_names, m_team_stats, by = c("Name","team")) 
+main_womens_df <- left_join(w_names, w_team_stats, by = c("Name","team"))
+```
+
+# Adjective Extraction using the adj_assignment function
+```{r}
+mens_articles <- list.files(path = "Shiny_Mens_Text", full.names = T)
+all_mens_adjectives <- lapply(mens_articles, function(x){
+  adj_assignment(file_name = x, player_name = all_mens_team_player_counts %>% distinct())
+})
+all_mens_adjectives <- all_mens_adjectives %>% rbindlist(., use.names = T, fill = T)
+
+womens_articles <- list.files(path = "Shiny_Womens_Text", full.names = T)
+all_womens_adjectives <- lapply(womens_articles, function(x){
+  adj_assignment(file_name = x, player_name = all_womens_team_player_counts %>% distinct())
+})
+all_womens_adjectives <- all_womens_adjectives %>% rbindlist(., use.names = T, fill = T)
+```
+
+# Adjective Saving into .Rdata
+```{r}
+all_mens_adjectives <- all_mens_adjectives %>% group_by(keyword, team) %>%
+  summarize(player_adj = list(unlist(player_adj)))
+save(all_mens_adjectives, file = "all_mens_adjectives.Rdata")
+
+all_womens_adjectives <- all_womens_adjectives %>% group_by(keyword, team) %>%
+  summarize(player_adj = list(unlist(player_adj)))
+save(all_womens_adjectives, file = "all_womens_adjectives.Rdata")
+```
+
+# Afinn Sentiment 
+```{r}
+afinn <- get_sentiments("afinn")
+```
+
+# Main Men's df
+```{r}
+main_mens_df <- main_mens_df %>%
+  left_join(all_mens_adjectives %>%
+              rename(last_name = keyword)) %>%
+  left_join(all_mens_team_player_counts %>%
+              distinct() %>%
+              filter(count > 0) %>%
+              group_by(keyword, team) %>%
+              summarize(n_articles = n(),
+                        total_mentions = sum(count),
+                        avg_mentions = mean(count)) %>%
+              rename(last_name = keyword)) %>%
+  mutate_if(is.numeric, function(x){
+    ifelse(is.na(x), 0, x)}) %>%
+  left_join(all_mens_adjectives %>%
+              unnest(player_adj) %>%
+              left_join(.,afinn, by = c("player_adj" = "word")) %>%
+              group_by(keyword, team) %>%
+              summarize(n_adj = n(),
+                        sent_score = mean(value, na.rm = T)) %>%
+              rename(last_name = keyword)) %>%
+  left_join(mens_teams %>% group_by(team) %>%
+  summarize(total_team_article = n(),
+            is_recap = sum(grepl("/recap", content_urls)),
+            is_story = sum(grepl("/story", content_urls)),
+            is_mens =  sum(grepl("/mens", content_urls)),
+            is_womens = sum(grepl("/womens", content_urls))))
+
+```
+
+# Main Women's df
+```{r}
+main_womens_df <- main_womens_df %>%
+  left_join(all_womens_adjectives %>%
+              rename(last_name = keyword)) %>%
+  left_join(all_womens_team_player_counts %>%
+              distinct() %>%
+              filter(count > 0) %>%
+              group_by(keyword, team) %>%
+              summarize(n_articles = n(),
+                        total_mentions = sum(count),
+                        avg_mentions = mean(count)) %>%
+              rename(last_name = keyword)) %>%
+  mutate_if(is.numeric, function(x){
+    ifelse(is.na(x), 0, x)}) %>%
+  left_join(all_womens_adjectives %>%
+              unnest(player_adj) %>%
+              left_join(.,afinn, by = c("player_adj" = "word")) %>%
+              group_by(keyword, team) %>%
+              summarize(n_adj = n(),
+                        sent_score = mean(value, na.rm = T)) %>%
+              rename(last_name = keyword)) %>%
+  left_join(womens_teams %>% group_by(team) %>%
+  summarize(total_team_article = n(),
+            is_recap = sum(grepl("/recap", content_urls)),
+            is_story = sum(grepl("/story", content_urls)),
+            is_mens =  sum(grepl("/mens", content_urls)),
+            is_womens = sum(grepl("/womens", content_urls))))
+
+```
+# Making a Main DF for everything
+```{r}
+main_df <- rbindlist(list(main_mens_df %>% mutate(gender = "men"),
+                          main_womens_df %>% mutate(gender = "women")), 
+                     use.names = T, fill = T)
+```
+
+# How many recaps are there for men vs women
+```{r}
+mens_teams %>% filter(grepl("/recap", content_urls)) %>%
+  nrow() ## There are 2,784 recaps for the men
+womens_teams %>% filter(grepl("/recap", content_urls)) %>%
+  nrow() ## There are only 340 recaps for the women
+
+```
+# How many "women's articles" are not under womens URLs?
+```{r}
+womens_teams %>% filter(!grepl("/womens", content_urls)) %>%
+  nrow()
+# 363 of the 1855 articles are not womens-related
+
+```
+# Testing Visualizations for the Men's 
+```{r}
+main_mens_df %>%
+  ggplot() +
+  geom_boxplot(aes(x = Position, y = sent_score)) ## something weird with centers. Forwards and Guards are very similar
+
+main_mens_df %>%
+  ggplot() +
+  geom_point(aes(x = xPTS, y = sent_score))
+
+main_mens_df %>%
+  mutate(in_article = n_articles > 0) %>%
+  ggplot() + 
+  geom_boxplot(aes(x = in_article, y= xPTS)) ## score points, get in articles
+
+main_womens_df %>%
+  ggplot() +
+  geom_boxplot(aes(x = Position, y = sent_score)) 
+
+main_womens_df %>%
+  ggplot() +
+  geom_point(aes(x = xPTS, y = sent_score))
+
+main_womens_df %>%
+  mutate(in_article = n_articles > 0) %>%
+  ggplot() + 
+  geom_boxplot(aes(x = in_article, y= xPTS)) ## score points, get in articles
+
+
+  
+```
+# Boxplot Visualizations for both Genders
+```{r}
+main_df %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = n_articles)) +
+  labs(title = "How Many Articles is the median NCAAM and NCAAW players are featured in?",
+       subtitle = "Boxplots show suprising Median Number of 0 Article Features for NCAAW Players",
+       x = "Gender",
+       y = "Number of Articles Player is Mentioned in")
+
+  
+  # avg player for NCAAM gets about 1 article, avg women gets 0. Also, getting 1 article is an outlier for women
+
+main_df %>% 
+  group_by(gender, team) %>%
+  summarize(n_articles = sum(n_articles)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = n_articles)) +
+  labs(title = "How Many Mentions of Players on a given NCAAM/NCAAW Team are found in Homepage Articles?",
+       x = "Gender",
+       y = "Number of Player Mentions in Team Homepage Articles")
+       ## for sum of the articles that a team of men's players appears in is 25 vs womens 2
+
+main_df %>% 
+  distinct(gender, team, total_team_article) %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = total_team_article)) +
+  labs(title = "How Many Articles do NCAAM and NCAAW Teams have on their Homepage?",
+       subtitle = "Note: Maximum Article Count is 10",
+       x = "Gender",
+       y = "Number of Articles on Homepage")
+       
+## avg men team gets 9 articles vs women getting 5 
+
+main_df %>% 
+  distinct(gender, team, is_recap) %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = is_recap)) +
+  labs(title = "How many Game Recaps are Featured on Team Homepages?",
+       subtitle = "Recap defined by /recap in URL",
+       x = "Gender",
+       y = "Count of Recaps")
+# how many of the articles are recap articles
+
+main_df %>% 
+  mutate(is_correct_gender = if_else(
+    gender == "men", is_mens, is_womens)) %>%
+  mutate(per_same_gender = is_correct_gender/total_team_article) %>% 
+  distinct(gender, team, per_same_gender) %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = per_same_gender)) +
+  labs(title = "What Percentage of Homepage Articles are assigned to the Correct League (and even Sport)?",
+       subtitle = "Note: Correct URLs included mens-college-basketball for NCAAM and womens-college basketball for NCAAW",
+       x = "Gender",
+       y = "Percent of Articles assigned Correctly")## how many of the articles are assigned to the right sport for both mens and womens
+
+    ## on the men's team, nearly 100% of time it is a men's article
+    
+
+main_df %>%
+  filter(total_mentions > 0) %>%
+  ggplot() +
+  geom_boxplot(aes(x = gender, y = sent_score))
+
+main_df %>%
+  ggplot() + 
+  geom_point(aes(x = total_mentions, y = sent_score, color = gender, shape = gender)) +
+  scale_color_manual(values = c("blue", "red")) +
+  scale_shape_manual(values = c(21, 22))
+
+main_df %>%
+  filter(avg_mentions > 0,
+         sent_score != 0) %>%
+  ggplot() +  
+  geom_point(aes(x = total_mentions, y = sent_score, color = gender, alpha = 0.9)) +
+  facet_wrap(~ gender) +
+  scale_color_manual(values = c("blue", "red")) +
+  scale_alpha_continuous(guide = "none") +
+  labs(title = "How does Sentiment Score relate to Player Mentions? (Seperated by Gender)",
+       subtitle = "Sentiment Scores determined by Afinn Sentiment of Adjectives Associated with a Player",
+       x = "Total Mentions",
+       y = "Sentiment Score")
+
+main_df %>%
+  filter(avg_mentions > 0,
+         sent_score != 0) %>%
+  ggplot() +  
+  geom_point(aes(x = total_mentions, y = sent_score, color = gender, alpha = 0.9)) +
+  scale_color_manual(values = c("blue", "red")) +
+  scale_alpha_continuous(guide = "none") +
+  labs(title = "How does Sentiment Score relate to Player Mentions?",
+       subtitle = "Sentiment Scores determined by Afinn Sentiment of Adjectives Associated with a Player",
+       x = "Total Mentions",
+       y = "Sentiment Score")## total mentions graph
+
+main_df %>%
+  filter(avg_mentions > 0,
+         sent_score != 0) %>%
+  ggplot() +  
+  geom_point(aes(x = avg_mentions, y = sent_score, color = gender, alpha = 0.9)) +
+  scale_color_manual(values = c("blue", "red")) +
+  scale_alpha_continuous(guide = "none") +
+  labs(title = "How does Sentiment Score relate to Average Player Mentions?",
+       subtitle = "Sentiment Scores determined by Afinn Sentiment of Adjectives Associated with a Player",
+       x = "Average Mentions across all Articles Included in",
+       y = "Sentiment Score")
+  ## total mentions graph
+
+
+```
+
+# Testing out Wordclouds
+```{r}
+z <- main_df %>%
+  select(gender, team, player_adj) %>%
+  unnest(player_adj)
+
+
+z <- z %>%
+  mutate(team = str_match(team, "^(.*?)\\sStats\\s(.*?)$")[, c(2, 3)]) %>%
+  mutate(team = paste0(team[, 1], " Women's Team ", team[, 2]))
+
+for (i in 1:5) {
+  plot <- wordcloud(z %>%
+                      filter(team == z$team[i]) %>%
+                      pull(player_adj), max.words = 100)
+  title(main = paste(tools::toTitleCase(z$gender[i]),z$team[i]), sub = "Player Adjectives")
+  print(plot)
+}
+```
+# Incorporate Bing into the Wordclouds
+```{r}
+bing <- get_sentiments("bing") 
+
+for (i in 1:5) {
+  z %>% filter(team == z$team[i]) %>%
+  rename(word = player_adj) %>%
+  inner_join(bing) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("#F8766D", "#00FF00"),
+                   max.words = 100)
+}
+```
+# Player Search Word Cloud: Insert a player's name and see the word cloud, number of adjectives and sentiment score
+```{r}
+# For this example, we will be using Olivia Miles from Notre Dame Women's Team
+main_df %>%
+  filter(Name == "Olivia Miles" & team == "Notre Dame Fighting Irish Stats 2022-23") %>%
+  select(player_adj, n_adj, sent_score) %>%
+  unlist() %>%
+  wordcloud(words = .) %>%
+  title(main = "Olivia Miles' Word Cloud of Adjectives",
+        sub = paste("Total Adjectives:", main_df[Name == "Olivia Miles"]$n_adj, 
+                    "Sentiment Score:", main_df[Name == "Olivia Miles"]$sent_score)) ## the subtitle doesn't work for now
+
+```
+
+# "Functionizing" the Player Search Word Cloud
+```{r}
+function(Name, team)
+```
+
+
+# Team Word Cloud: Insert a Team and see the word clouds for both genders side by side
+```{r}
+main_df %>%
+    filter(team == "Houston Cougars Stats 2022-23") %>%
+    group_by(gender) %>%
+    select(player_adj, n_adj, sent_score) %>%
+    summarise(all_adj = paste(unlist(player_adj))) %>%
+    mutate(all_adj = str_split(all_adj, " ")) %>%
+    unnest(cols = all_adj) %>%
+    group_by(all_adj) %>%
+    summarize(gender = gender, count = n()) %>%
+    mutate(n = count) %>%
+    unique() %>%
+  ggplot(., aes(label = all_adj)) +
+  geom_text_wordcloud(aes(size = n)) +
+    scale_size_area(max_size = 8.2) +
+  facet_wrap(~ gender)
+
+
+## this code makes a wordcloud. I need to figure out n() for each adj so I can include the size = argument in the facet_wrap to make the ones that appear more larger in size
+
+
+```
+
+# Games Played vs Mentions: Bar Chart
+```{r}
+main_df %>%
+  group_by(GP, gender) %>%
+  summarize(n_mentions = mean(avg_mentions)) %>%
+  ggplot(aes(x = GP, y = n_mentions)) +
+  geom_col() +
+  facet_wrap(~ gender) + 
+  labs(title = "Player Mentions vs Games Played in 2022-23 Season",
+       x = "Games Played",
+       y = "Mentions in Articles")
+
+```
+
+# PRA vs Mentions: Bar Chart
+```{r}
+main_df %>%
+  mutate(PRA = xPTS + xREB + xAST) %>%
+  group_by(PRA, gender) %>%
+  summarize(n_mentions = mean(avg_mentions)) %>%
+  filter(n_mentions > 0) %>%
+  ggplot(aes(x = PRA, y = n_mentions)) +
+  geom_point() +
+  geom_smooth(method = lm, se = FALSE, color = "dodgerblue3") +
+  facet_wrap(~ gender) +
+  labs(title = "PRA (Sum of Points, Rebounds and Assists) vs Player Mentions",
+       subtitle = "Blue Line Represents Line of Best Fit",
+       x = "PRA",
+       y = "Mentions in Articles")
+```
+
+# Sentiment of PGs vs C 
+```{r}
+main_df %>%
+  filter(!Position %in% c("A","H")) %>%
+  group_by(gender, Position) %>%
+  summarize(sent_score = mean(sent_score, na.rm = TRUE)) %>%
+  ggplot(aes(x = Position, y = sent_score)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~gender) +
+  labs(title = "Sentiment Scores of Adjectives in Articles Grouped By Position",
+       subtitle = "C denotes Center, F denotes Forward, and G denotes Guard",
+       x = "Position",
+       y = "Sentiment Score of Adjectives")
+## something weird with centers. Forwards and Guards are very similar
+
+## not sure if there is a better way to visualize this?
+
+```
+
+# Loat the NCAAW teams with least *women* articles
+```{r}
+main_df %>%
+  mutate(is_correct_gender = if_else(
+    gender == "men", is_mens, is_womens)) %>%
+  mutate(per_same_gender = is_correct_gender/total_team_article) %>% 
+  distinct(team, gender, per_same_gender, total_team_article, is_mens, is_womens) %>%
+  filter(gender == "women") %>%
+  filter(total_team_article > 0) %>%
+  arrange(per_same_gender)
+
+
+```
+
+# Top 10 Tokenized Words by Gender
+```{r}
+library(kableExtra)
+
+
+main_df %>%
+  filter(gender == "men") %>%
+  select(player_adj) %>%
+  unlist() %>%
+  table() %>%
+  sort(decreasing = TRUE) %>%
+  head(10) %>%
+  as.data.frame() %>% 
+  kable(caption = "Top 10 most used adjectives for Men",
+        col.names = c("Adjective", "Frequency")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"))
+  
+
+
+main_df %>%
+  filter(gender == "women") %>%
+  select(player_adj) %>%
+  unlist() %>%
+  table() %>%
+  sort(decreasing = TRUE) %>%
+  head(10) %>%
+  as.data.frame() %>% 
+  kable(caption = "Top 10 most used adjectives for Men",
+        col.names = c("Adjective", "Frequency")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"))
+
+
+```
+
+# Top 10 Tokenized Words by Team
+```{r}
+library(kableExtra)
+
+main_df %>%
+  filter(team == "Duke Blue Devils Stats 2022-23") %>%
+  select(player_adj) %>%
+  unlist() %>%
+  table() %>%
+  sort(decreasing = TRUE) %>%
+  head(10) %>%
+  as.data.frame() %>%
+  kable(caption = "Top 10 most used adjectives for Men",
+        col.names = c("Adjective", "Frequency")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"))
+
+main_df %>%
+  select(player_adj) %>%
+  unlist() %>%
+  table() %>%
+  sort(decreasing = TRUE) %>%
+  head(10) %>%
+  as.data.frame() %>%
+  kable(caption = "Top 10 most used adjectives for Men",
+        col.names = c("Adjective", "Frequency")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered"))
+
+```
+
+```{r}
+ has_womens = main_df %>%
+        filter(team == "Austin Peay Governors Stats 2022-23") %>%
+        filter(gender == "women") %>%
+        summarize(n_adj = sum(n_adj)) %>%
+        pull(n_adj)
+      check_womens = ifelse(has_womens > 0, " ", "Note: The wordcloud only includes men's adjectives because there are no mentions of players on the women's team")
+      has_mens = main_df %>%
+        filter(team == "Austin Peay Governors Stats 2022-23") %>%
+        filter(gender == "men") %>%
+        summarize(n_adj = sum(n_adj)) %>%
+        pull(n_adj)
+      check_mens = ifelse(has_mens > 0, " ", "Note: The wordcloud only includes men's adjectives because there are no mentions of players on the women's team")
+      check_any = ifelse(has_womens == 0 & has_mens == 0, "Note: The wordcloud doesn't include any adjectives because there are no mentions of players on the men's or women's team",
+                         "")
+
+main_df %>%
+        filter(team == "Oklahoma Sooners Stats 2022-23") %>%
+        group_by(gender) %>%
+        select(player_adj, n_adj, sent_score) %>%
+        summarise(all_adj = paste(unlist(player_adj))) %>%
+        mutate(all_adj = str_split(all_adj, " ")) %>%
+        unnest(cols = all_adj) %>%
+        group_by(all_adj) %>%
+        summarize(gender = gender, count = n()) %>%
+        mutate(n = count) %>%
+        unique() %>%
+        ggplot(., aes(label = all_adj)) +
+        geom_text_wordcloud(aes(size = n)) +
+        scale_size_area(max_size = 8.6) +
+        facet_wrap(~ gender) +
+        labs(title = "Wordcloud of Adjectives used to describe Male and Female athletes",
+             subtitle = paste(ifelse(check_any != "", check_any, ""), 
+                     ifelse(check_womens != "", check_womens, ""), 
+                     ifelse(check_mens != "", check_mens, "")))
+```
+
+subtitle = paste(ifelse(check_any != "", check_any, ""), 
+                     ifelse(check_womens != "", check_womens, ""), 
+                     ifelse(check_mens != "", check_mens, ""))
+       
+## add a r^2 to the PtsvsMentions plot                    
+```{r}
+## r2 = format(summary(m)$r.squared, digits = 3)))
+install.packages("ggpubr")
+library(ggpubr)
+
+
+
+```
+                     
+## Team Roster for the Team Comparison Page:
+```{r}
+main_df %>%
+  filter(team == "Duke Blue Devils Stats 2022-23") %>%
+  split(.$gender) %>%
+  lapply(function(x){
+    x %>% select(Name, Position)
+  }) %>%
+  cbind(.[["men"]], .[["women"]]) %>%
+  .[,-1] %>%
+  as.data.frame() %>%
+  kbl(caption = "Men's and Women's Team Rosters",
+      col.names = c("Men's Team", "Position", "Women's Team", "Position")) %>%
+  kable_classic(full_width = F, html_font = "Columbia") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "bordered", "repeat-header"),
+                position = "center")
+
+```
+
+```{r}
+main_df_good %>%
+  group_by(gender) %>%
+  summarize(mean_n_articles = mean(n_articles), by = gender)
+```
+
