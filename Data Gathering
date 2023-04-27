@@ -1,0 +1,213 @@
+---
+title: "Data Gathering"
+author: "Nate Yellin" 
+---
+
+---
+Instructions: The notebook should contain all the functions that deal with data collection, any notes or documentation that Nate might need to run again in the future for other years. All self-contained in an .Rmd (R Notebook) file. 
+Goal is the notebook can run from start to finish and collect all the data again from scratch. 
+---
+# Libraries
+```{r}
+library(data.table)
+library(tidyverse)
+library(rvest)
+library(stringi)
+library(tidytext)
+```
+
+# Functions
+```{r}
+## cleangamestats seperates a player's position from their name and add it to a new column. It is used in the function below to actually scrape players and player stats
+cleangamestats <- function(x){
+  x %>%
+    filter(Name != 'Total') %>%
+    mutate(Position = stri_sub(Name, -1)) %>%
+    mutate(Name = substr(Name,1,
+                         nchar(Name)-1)) %>%
+    mutate(Name = str_trim(Name, "right"))}
+
+## scrape_espn scrapes every single team's stats df
+scrape_espn <- function(input_url, season_year = 2022){
+  cat(paste("scraping", input_url), fill = TRUE)
+  # read in html
+  page_info <- read_html(input_url)
+  
+  # pull out tables
+  page_tables <- page_info %>%
+    html_nodes("table") %>%
+    html_table()
+  # pull out team name
+  team_name <- page_info %>%
+    html_nodes("h1") %>%
+    html_text()
+  
+  per_game_stats <- cbind(page_tables[[1]], page_tables[[2]])
+  season_stats <- cbind(page_tables[[3]], page_tables[[4]])
+  
+  per_game_stats <- cleangamestats(per_game_stats) 
+  per_game_stats <- per_game_stats %>%
+    rename(
+      xMIN = MIN,
+      xPTS = PTS,
+      xREB = REB,
+      xAST = AST,
+      xSTL = STL,
+      xBLK = BLK,
+      xTO = TO) 
+  season_stats <- cleangamestats(season_stats)
+  
+  stats <- full_join(per_game_stats, season_stats, by = c('Name', 'Position'))
+  stats$teamurl <- input_url
+  stats$team <- team_name[[2]]
+  return(stats)
+}
+
+## scrape_link gets homepage articles for every single team
+scrape_link <- function(x){
+  page_url <- gsub("stats/","",x)
+  cat(paste("scraping", page_url), fill = TRUE)
+  # read in html
+  page_info <- read_html(page_url) %>%
+    html_elements("article") %>%
+    html_elements("a") %>%
+    html_attr("href")
+  return(page_info)
+  
+}
+
+
+##  find_espn_teams pulls team links from ESPN website to access the stats page
+find_espn_teams <- function(base_url = "https://www.espn.com/womens-college-basketball/teams", 
+                            year = 2022){
+  page_info <- read_html(base_url) %>%
+    html_nodes("section") %>%
+    html_nodes("a") %>%
+    html_attr("href") %>%
+    unique()
+  page_info <- page_info[grepl("stats", page_info)]
+  paste0('https://www.espn.com',page_info , "/",year)
+}
+
+## get_team_stats is a function that scrapes a team's player stats
+get_team_stats <- function(team_links){
+  df <-lapply(team_links, function(x){
+    try(scrape_espn(x))})
+  df <- df[lapply(df, is.data.frame) %>% unlist()] %>%
+    rbindlist(., use.names = T, fill = T) 
+  return(df)}
+## get_content_urls is a function that scrapes the URLs of the articles belonging to a team's homepage on ESPN
+get_content_urls <- function(link_list){
+  content <- lapply(link_list, function(x){
+    tryCatch(scrape_link(x), error = function(e) NULL
+    )})
+  data.table(link_name = link_list, content_urls = content)
+}
+## text_scraper is a function that scrapes the text of an ESPN article
+text_scraper <- function(x){
+  x <- paste0('https://www.espn.com', x)
+  if(grepl("recap/",x)){
+    # recap
+    read_html(x) %>%
+      html_node(xpath = '//*[@class="Story__Body t__body"]') %>%
+      html_text()
+  } else {
+    # other
+    read_html(x) %>%
+      html_node(xpath = '//*[@class="article-body"]') %>%
+      html_text()
+  }
+}
+
+## save_article is a function that saves an article into a .txt file saved in a computer file
+save_article <- function(x, folder = "Shiny_Articles"){
+  article_text <- text_scraper(x)
+  write.table(article_text, file.path(folder, paste0(basename(x), ".txt")),
+              row.names = FALSE,
+              col.names = FALSE)
+}
+```
+
+# Scraping Team Links
+```{r}
+w_team_links <- find_espn_teams(base_url = "https://www.espn.com/womens-college-basketball/teams", year = 2022)
+m_team_links <- find_espn_teams(base_url = "https://www.espn.com/mens-college-basketball/teams", year = 2022)
+```
+
+# Scrape Player Stats by Team
+```{r}
+w_team_stats <- get_team_stats(w_team_links)
+m_team_stats <- get_team_stats(m_team_links)
+```
+# Save out Links and Stats
+```{r}
+save(w_team_links, file = "w_team_links_2022.RData")
+save(m_team_links, file = "m_team_links_2022.RData")
+save(w_team_stats, file = "w_team_stats_2022.RData")
+save(m_team_stats, file = "m_team_stats_2022.RData")
+```
+
+# Scrape Article Links
+```{r}
+wcontent <- w_team_links %>%
+  get_content_urls()
+mcontent <- m_team_links %>%
+  get_content_urls()
+```
+# New Layer
+    1. Are men-articles under mens URLs (probably yes)
+    2. Are womens articles under non-womens URLS (unfortunately, yes)
+    3. Distinguish between "recap" and "story"
+
+
+# Scrape NCAA Teams
+```{r}
+mens_teams <- m_team_stats %>%
+  distinct(team, teamurl)
+womens_teams <- w_team_stats %>%
+  distinct(team, teamurl)
+
+mens_teams <- left_join(mens_teams, mcontent, by = c('teamurl' = 'link_name'))
+womens_teams <- left_join(womens_teams, wcontent, by = c('teamurl' = 'link_name'))
+```
+
+# Combine articles and team data
+```{r}
+mens_teams <- mens_teams %>%
+  unnest(content_urls) %>%
+  mutate(article_file_name = paste0(basename(content_urls),".txt"))
+
+## womens_unrelated_urls <- c("nhl", "nfl", "olympic", "football", "mlb", '/men', 'nba')
+womens_teams <- womens_teams %>%
+  unnest(content_urls) %>%
+  mutate(article_file_name = paste0(basename(content_urls),".txt"))
+
+##  filter(str_detect(content_urls, paste(womens_unrelated_urls, collapse = "|"), negate = TRUE)) %>%
+## filter(str_detect(article_file_name, paste(womens_unrelated_urls, collapse = "|"), negate = TRUE))
+
+
+
+## can be noted that the womens_teams df has 1501 obs (x3 the mens) and if you look at the content urls, a lot are coming from wnba articles, mens urls or even college football URLS! This shows us that there is a lack of womens content and these webpages are being artificially pumped with unrelated content urls
+  ## 115 articles classified under men's NCAA, one nhl article, 2 nfl articles, 2 olympic articles and 3 mlb articles! Why is ESPN putting these under the NCAAW homepages. Answer: a lot of them are female related. NIL deals, women representation in different sports, etc. But still, fact of the matter is that this is not occuring for the men and it is for the women
+
+```
+
+# Save articles
+```{r}
+dir.create(file.path(getwd(), 'Shiny_Mens_Text'))
+dir.create(file.path(getwd(), 'Shiny_Womens_Text'))
+
+lapply(mens_teams$content_urls, function(z){
+  try(save_article(x=z, folder = "Shiny_Mens_Text"))
+})
+lapply(womens_teams$content_urls, function(z){
+  try(save_article(x=z, folder = "Shiny_Womens_Text"))
+})
+      # some women articles are outsourced to other websites like theundefeated.com, secsports.com, and fivethirtyeight.com
+
+```
+
+
+
+
+
